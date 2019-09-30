@@ -115,10 +115,14 @@ def custom_r2_metric(y_true, y_pred):
 	squared_total = keras.backend.sum(keras.backend.square(y_true-keras.backend.mean(y_true)))
 	return(1-squared_res/(squared_total+eps))
 
-def build_all_connected_models(feature_dim):
+def build_all_connected_models(feature_dim, output_scheme="regression"):
 	"""
 	keras model with multiple outputs
 	AlphaDropout: 1. mean and std stays the same 2. normalization property stays the same
+	output can be either regression mode or classification mode (output_scheme="regression" or "ordinal_clf")
+	If in classification mode, the strategy used is in the following paper:
+	Cheng, Jianlin, Zheng Wang, and Gianluca Pollastri. "A neural network approach to ordinal regression." 
+	2008 IEEE International Joint Conference on Neural Networks (IEEE World Congress on Computational Intelligence). IEEE, 2008.
 	"""
 	input_layer = keras.layers.Input(shape=[feature_dim])
 	hidden1 = keras.layers.Dense(1000, activation='relu', 
@@ -135,22 +139,24 @@ def build_all_connected_models(feature_dim):
 		kernel_regularizer=keras.regularizers.l2(0.01), 
 		kernel_initializer="he_uniform")(dropout2)
 	#bn3 = keras.layers.BatchNormalization()(hidden3)
-	out1 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
-		kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
-		name="out1")(hidden3)
-	out2 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
-		kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
-		name="out2")(hidden3)
-	out3 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
-		kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
-		name="out3")(hidden3)
-	out4 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
-		kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
-		name="out4")(hidden3)
-	out5 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
-		kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
-		name="out5")(hidden3)
-
+	if (output_scheme=="regression"):
+		out1 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
+			kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
+			name="out1")(hidden3)
+		out2 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
+			kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
+			name="out2")(hidden3)
+		out3 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
+			kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
+			name="out3")(hidden3)
+		out4 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
+			kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
+			name="out4")(hidden3)
+		out5 = keras.layers.Dense(1, activation=lambda x: keras.activations.relu(x, max_value=9.0), 
+			kernel_regularizer=keras.regularizers.l2(0.01), kernel_initializer="he_uniform", 
+			name="out5")(hidden3)
+	elif (output_scheme == "ordinal_clf"):
+		pass
 	model = keras.models.Model(inputs=[input_layer],
 							   outputs=[out1, out2, out3, out4, out5])
 	model.compile(loss="mse", 
@@ -158,6 +164,22 @@ def build_all_connected_models(feature_dim):
 				  metrics=['mae', custom_r2_metric])
 	model.summary()
 	return model
+
+def generate_loss_weight_criteria(num_traits, num_classes=10, weighted_loss=True):
+	"""
+	define class weights to put more focus on highly DM locus
+	"""
+	if (weighted_loss):
+		print("use different weight for each class")
+		print("put more focus on locus with more significant DM p-values")
+		class_weight_each_output_dict = dict([(i, i+1) for i in range(0, num_classes)])
+		class_weight_dict = dict([("out%i"%i, class_weight_each_output_dict) for i in range(1, num_traits+1)])
+	else:
+		print("use balanced weight for each class")
+		class_weight_each_output_dict = dict([(i, 1) for i in range(0, num_classes)])
+		class_weight_dict = dict([("out%i"%i, class_weight_each_output_dict) for i in range(1, num_traits+1)])
+	return class_weight_dict
+
 
 def plot_learning_curves(history, lr_curves_dir=lr_curves_dir):
 	"""
@@ -207,9 +229,35 @@ def report_mean_mae_across_traits(history, dataset_type):
 	mae_df.loc[:, "mean_mae"] = mae_df.mean(axis=1)
 	print("minimum mean MAE for %s occurs in epoch %i: %.3f" % (dataset_type, mae_df["mean_mae"].argmin(), mae_df["mean_mae"].min()))
 
-def evaluate_by_label(trained_model, x_mat, y_mat, straitification_col, prefix, traits_info_list):
+def generate_discretized_predictions(trained_model, x_train, x_valid, x_test, num_classes=10):
 	"""
-	Two modes possible:
+	generate 3 numpy arrays:
+	discretized training/validation/testing predictions
+	"""
+	print("generating discretized predictions...")
+	train_preds = np.concatenate(model.predict(x_train), axis=1)
+	valid_preds = np.concatenate(model.predict(x_valid), axis=1)
+	test_preds = np.concatenate(model.predict(x_test), axis=1)
+	discretized_train_preds = []
+	discretized_valid_preds = []
+	discretized_test_preds = []
+	all_traits_bin_levels = []
+	for col_ind in range(train_preds.shape[1]):
+		train_preds_single_trait, bin_levels = pd.qcut(train_preds[:, col_ind], q=num_classes, labels=range(0, num_classes), retbins=True)	
+		print(bin_levels)
+		discretized_train_preds += [train_preds_single_trait]
+		all_traits_bin_levels += [bin_levels]
+		discretized_valid_preds += [np.digitize(valid_preds[:, col_ind], bins=bin_levels[1:], right=True)]
+		discretized_test_preds += [np.digitize(test_preds[:, col_ind], bins=bin_levels[1:], right=True)]
+	discretized_train_preds = np.column_stack(discretized_train_preds)
+	discretized_valid_preds = np.column_stack(discretized_valid_preds)
+	discretized_test_preds = np.column_stack(discretized_test_preds)
+	print("completed...")
+	return (discretized_train_preds, discretized_valid_preds, discretized_test_preds)
+
+def evaluate_by_label(trained_model, y_mat, straitification_col, prefix, traits_info_list, x_mat=None, preds=None):
+	"""
+	Two modes available:
 	specify straitification_col="labels" or straitification_col="preds"
 	1) evaluate by labels: evaluate MAE when true label is 1, 2, 3, ..., 9
 	2) evaluate by predictions: eavaluate MAE when predictions is 0-1, 1-2, ..., 9-10
@@ -217,8 +265,14 @@ def evaluate_by_label(trained_model, x_mat, y_mat, straitification_col, prefix, 
 	evaluate by predictions is a preferred way since the goal is to annotate unknown locus across the genome
 	we want our predictions be as accurate as possible
 	"""
-	print("predicting on %s set by %s..." % (prefix, straitification_col))
-	preds = np.concatenate(model.predict(x_mat), axis=1)
+	if ((x_mat is None) and (preds is None)):
+		print("provide at design matrix(X) or predictions")
+		return
+	if (x_mat):
+		print("predicting on %s set by %s..." % (prefix, straitification_col))
+		preds = np.concatenate(model.predict(x_mat), axis=1)
+	else:
+		print("using provided predictions for evaluation")
 	result_dict = {}
 	for i, trait in enumerate(traits_info_list):
 		trait_preds_label_df = pd.DataFrame({"preds": preds[:, i], "labels": y_mat[:, i]})
@@ -292,9 +346,8 @@ callbacks = [
 	keras.callbacks.EarlyStopping(patience=10, min_delta=1e-3)
 ]
 
-#define class weights to put more focus on highly DM locus
-class_weight = dict([(i, i+1) for i in range(0, 10)])
-class_weight_dict = dict([("out%i"%i, class_weight) for i in range(1, 6)])
+# decide weight strategy
+class_weight_dict = generate_loss_weight_criteria(num_traits=5, num_classes=10, weighted_loss=True)
 
 history = model.fit(x_train_scaled, y_train_multout,
 	validation_data=(x_valid_scaled, y_valid_multout),
@@ -312,15 +365,21 @@ plot_learning_curves(history)
 report_mean_mae_across_traits(history, dataset_type="train")
 report_mean_mae_across_traits(history, dataset_type="valid")
 
+d_train_preds, d_valid_preds, d_test_preds=generate_discretized_predictions(model, 
+																			x_train=x_train_scaled,
+																			x_valid=x_valid_scaled,
+																			x_test=x_test_scaled,
+																			num_classes=10)
+
 ### evaluation by labels
-print(evaluate_by_label(model, x_train_scaled, y_train, straitification_col="labels", prefix="train", traits_info_list=traits_info_list))
-print(evaluate_by_label(model, x_valid_scaled, y_valid, straitification_col="labels",prefix="valid", traits_info_list=traits_info_list))
-print(evaluate_by_label(model, x_test_scaled, y_test, straitification_col="labels", prefix="test", traits_info_list=traits_info_list))
+#print(evaluate_by_label(model, y_train, straitification_col="labels", prefix="train", traits_info_list=traits_info_list, x_mat=x_train_scaled))
+#print(evaluate_by_label(model, y_valid, straitification_col="labels",prefix="valid", traits_info_list=traits_info_list, x_mat=x_valid_scaled))
+#print(evaluate_by_label(model, y_test, straitification_col="labels", prefix="test", traits_info_list=traits_info_list, x_mat=x_test_scaled))
 
 ### evaluation by preds
-print(evaluate_by_label(model, x_train_scaled, y_train, straitification_col="preds", prefix="train", traits_info_list=traits_info_list))
-print(evaluate_by_label(model, x_valid_scaled, y_valid, straitification_col="preds",prefix="valid", traits_info_list=traits_info_list))
-print(evaluate_by_label(model, x_test_scaled, y_test, straitification_col="preds", prefix="test", traits_info_list=traits_info_list))
+print(evaluate_by_label(model, y_train, straitification_col="preds", prefix="train", traits_info_list=traits_info_list, preds=d_train_preds))
+print(evaluate_by_label(model, y_valid, straitification_col="preds",prefix="valid", traits_info_list=traits_info_list, preds=d_valid_preds))
+print(evaluate_by_label(model, y_test, straitification_col="preds", prefix="test", traits_info_list=traits_info_list, preds=d_test_preds))
 
 
 ### simulation
