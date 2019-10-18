@@ -355,6 +355,7 @@ def generate_loss_weight_criteria(num_traits, num_classes=num_classes, weighted_
 def generate_loss_weight_criteria(num_traits, num_classes=num_classes, weighted_loss=True, top_only=None):
 	"""
 	define class weights to put more focus on highly DM locus
+	This leads to higher penalization on False Negative cases
 	param top_only takes into effect only when weighted_loss=True
 	"""
 	if (weighted_loss):
@@ -373,6 +374,11 @@ def generate_loss_weight_criteria(num_traits, num_classes=num_classes, weighted_
 		class_weight_each_output_dict = dict([(i, 1) for i in range(0, num_classes)])
 		class_weight_dict = dict([("out%i"%i, class_weight_each_output_dict) for i in range(1, num_traits+1)])
 	return class_weight_dict
+
+def custom_lower_fp_cost_func(y_pred, y_true):
+	curr_w = tf.math.floor(y_pred)
+	weighted_mse_loss = tf.tensordot(curr_w, tf.math.square(y_pred - y_true))
+	return weighted_mse_loss
 
 
 def plot_learning_curves(history, lr_curves_dir=lr_curves_dir):
